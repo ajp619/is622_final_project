@@ -55,3 +55,14 @@ docs/_build/
 
 # PyBuilder
 target/
+.Rproj.user
+
+# IPython Notebook Checkpoints
+.ipynb_checkpoints
+
+*.Rproj
+.Rhistory
+rmr-global-*
+rmr-local-*
+rmr-streaming-*
+metastore_db

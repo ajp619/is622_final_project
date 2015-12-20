@@ -1,0 +1,288 @@
+---
+title: "Final Project - Hadoop"
+author: "Aaron Palumbo"
+date: "12/19/2015"
+output: pdf_document
+---
+
+## Setup / Dependencies
+
+```{r}
+hadoopHome = 
+  "/home/apalumbo/workspace/cuny_msda_is622/hadoop-2.7.1"
+
+hadoopCmd = 
+  file.path(hadoopHome, "/bin/hadoop")
+
+hadoopStreaming = 
+  file.path(hadoopHome,
+    "/share/hadoop/tools/lib/hadoop-streaming-2.7.1.jar")
+
+Sys.setenv(HADOOP_HOME       = hadoopHome     )
+Sys.setenv(HADOOP_CMD        = hadoopCmd      )
+Sys.setenv(HADOOOP_STREAMING = hadoopStreaming)
+
+library(rmr2)
+library(rhdfs)
+hdfs.init()
+```
+
+Global Variables
+
+```{r}
+filePath = "/user/apalumbo/final/train_triplets.txt"
+# debug version
+# filePath = "/user/apalumbo/final/train_triplets_100.txt"
+colNames <- c("user", "song", "playCount")
+```
+
+Check system memory
+
+```{r}
+system("cat /proc/meminfo | grep Mem")
+```
+
+
+## First we will attempt to determine some basic information about the data.
+
+### Number of Rows
+
+```{r}
+fileOut  = "/user/apalumbo/final/hadoop_rows.out"
+
+# need to make sure output file does not exist
+if ( hdfs.exists(fileOut) ) {
+  hdfs.rm(fileOut)
+}
+
+begin <- Sys.time()
+
+out <- mapreduce(
+  input = filePath,
+  input.format = "text",
+  output = fileOut,
+  
+  map = function(k, v) 
+     keyval( "line", length(v) ),
+  
+  reduce = function(k, v)
+    keyval(k, sum(v))
+)
+
+finish <- Sys.time()
+
+# Results
+(numLines <- from.dfs(out))
+(finish - begin)
+```
+
+We see there are `r numLines$val` records and it took use `r finish - begin` seconds to determine that.
+
+### Unique Users
+
+Now let's determine how many unique users we have.
+
+```{r}
+# set output file and make sure it doesn't exist
+fileOut  = "/user/apalumbo/final/hadoop_users.out"
+
+if ( hdfs.exists(fileOut) ) {
+  hdfs.rm(fileOut)
+}
+
+splitLines <- function(line) {
+  # each line comes in as a string - split on tab
+  vec <- unlist(strsplit(line, '\t'))
+  # transform to data frame
+  df <- as.data.frame(matrix(vec, nrow=1))
+  colnames(df) <- c("user", "song", "playCount")
+  rownames(df) <- NULL
+  # transform playCount from string to int
+  df$playCount <- as.integer(as.character(df$playCount))
+  return(df)
+}
+
+mapper <- function(k, v) {
+  # stack lines as data frame
+  df <- as.data.frame(do.call(rbind, lapply(v, splitLines)))
+  return(keyval(df$user, 1))
+}
+
+begin <- Sys.time()
+
+# We need two reductions for this:
+out <- mapreduce(
+  input =  mapreduce(
+    input = filePath,
+    input.format = "text",
+    map = mapper,
+    reduce = function(k, v)
+      keyval(k, 1),
+    ## Use the reducer as a local combiner
+    combine=TRUE
+  ),
+  output = fileOut,
+  reduce = function(k, v)
+    keyval("unique_users", sum(v)),
+  ## Use the reducer as a local combiner
+  combine=TRUE
+)
+
+finish <- Sys.time()
+
+# Results
+numUsers <- from.dfs(out)
+(finish - begin)
+```
+
+As we see from above, it takes us `r finish - begin` seconds to determine there are `r numUsers$val` unique users in the database.
+
+### Unique Songs
+
+```{r}
+# set output file and make sure it doesn't exist
+fileOut  = "/user/apalumbo/final/hadoop_songs.out"
+
+if ( hdfs.exists(fileOut) ) {
+  hdfs.rm(fileOut)
+}
+
+# We can use the splitLines function from above
+
+mapper <- function(k, v) {
+  # stack lines as data frame
+  df <- as.data.frame(do.call(rbind, lapply(v, splitLines)))
+  return(keyval(df$song, 1))
+}
+
+begin <- Sys.time()
+
+# We need two reductions for this:
+out <- mapreduce(
+  input =  mapreduce(
+    input = filePath,
+    input.format = "text",
+    map = mapper,
+    reduce = function(k, v)
+      keyval(k, 1),
+    ## Use the reducer as a local combiner
+    combine=TRUE
+  ),
+  output = fileOut,
+  reduce = function(k, v)
+    keyval("unique_users", sum(v)),
+  ## Use the reducer as a local combiner
+  combine=TRUE
+)
+
+finish <- Sys.time()
+
+# Results
+numSongs <- from.dfs(out)
+(finish - begin)
+```
+
+Now we see that there are `r numSongs$val` unique songs in the database and that it took us `r finish - begin` seconds to determine that with hadoop.
+
+## Most Popular Songs
+
+A simple recommendation system might be based on what's popular. Let's see if we can determine that using hadoop.
+
+There are several approaches you could take to this using the map reduce paradigm. The approach we will take here is to first group the songs by number of plays. This should return a very reduced set of cadidates. The susequent mapreduce job can be treated more like a filter with a quick in memory sort at the end. This type of approach would also work better for repeated queries (e.g. top 10, top 15, top 20).
+
+```{r}
+# set output file and make sure it doesn't exist
+fileOut = "/user/apalumbo/final/hadoop_playcount.out"
+
+if ( hdfs.exists(fileOut) ) {
+  hdfs.rm(fileOut)
+}
+
+# We can use the splitLines function from above
+
+begin <- Sys.time()
+
+# .pc - play count
+mapper.pc <- function(k, v) {
+  # stack lines as data frame
+  df <- as.data.frame(do.call(rbind, lapply(v, splitLines)))
+  return(keyval(df$song, df$playCount))
+}
+
+out <- mapreduce(
+  input = filePath,
+  input.format = "text",
+  output = fileOut,
+  map = mapper.pc,
+  # for each song sum playcounts
+  reduce = function(k, v)
+    keyval(k, sum(v)),
+  ## Use the reducer as a local combiner
+  combine=TRUE
+)
+
+sumPlayCount <- out
+
+# At this point we have unique songs with total play count
+# Now we group by playCount and return that
+
+# set output file and make sure it doesn't exist
+fileOut = "/user/apalumbo/final/hadoop_playcount-groups.out"
+
+if ( hdfs.exists(fileOut) ) {
+  hdfs.rm(fileOut)
+}
+
+out <- mapreduce(
+  input = sumPlayCount,
+  output = fileOut,
+  map = function(k, v)
+    keyval(v, 1),
+  reduce = function(k, v)
+    keyval(k, sum(v)),
+  combine=TRUE
+)
+
+playcountGroups <- out
+
+# set output file and make sure it doesn't exist
+fileOut = "/user/apalumbo/final/hadoop_popular.out"
+
+if ( hdfs.exists(fileOut) ) {
+  hdfs.rm(fileOut)
+}
+# We will start by returning the top 10
+top <- 10
+pcGroups <- as.data.frame(from.dfs(playcountGroups))
+print(nrow(pcGroups))
+pcGroups <- pcGroups[order(pcGroups$key, decreasing=TRUE), ]
+pcGroups['cumsum'] <- cumsum(pcGroups$val)
+minPlayCount <- pcGroups$key[sum(pcGroups$cumsum < top) + 1]
+
+mapper <- function(k, v) {
+  filtr <- v >= minPlayCount
+  return(keyval(k[filtr], v[filtr]))
+}
+
+out <- mapreduce(
+  input = sumPlayCount,
+  output = fileOut,
+  map=mapper
+)
+
+finish <- Sys.time()
+
+# Results
+topSongs <- as.data.frame(from.dfs(out))
+(topSongs <- topSongs[order(topSongs$val, decreasing=TRUE), ])
+(finish - begin)
+```
+
+
+
+
+
+
+
+
+
